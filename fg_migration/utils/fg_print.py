@@ -30,7 +30,8 @@ def message(color, msg, colorend=Bcolors.ENDC, bold=False) -> str:
 
 def print_color(color, msg, colorend=Bcolors.ENDC, _bold=False) -> None:
     """Prints a message in color"""
-    print(message(color, msg, colorend))
+    # flush so progress shows up immediately, also when output is piped or logged
+    print(message(color, msg, colorend), flush=True)
 
 def debug(msg) -> None:
     """Prints a debug message"""
@@ -40,6 +41,26 @@ def debug(msg) -> None:
 def info(msg) -> None:
     """Prints an info message"""
     print_color(Bcolors.OKBLUE, msg)
+
+
+def progress(index:int, total:int|None, msg:str) -> None:
+    """Prints a progress message, e.g. [3/40] msg (or [3] msg if the total is unknown)"""
+    prefix = f"[{index}/{total}]" if total else f"[{index}]"
+    info(f"{prefix} {msg}")
+
+
+def section(msg) -> None:
+    """Prints a section header for a migration phase"""
+    print_color(Bcolors.HEADER, f"\n--- {msg} ---")
+
+
+def format_duration(seconds:float) -> str:
+    """Formats seconds as a human readable duration"""
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    return f"{minutes}m {secs}s" if minutes else f"{secs}s"
 
 
 def success(msg) -> None:

@@ -106,7 +106,7 @@ class ForgejoRolePermissionDefinition:
     # use of field here ensures new instance for every instance of the class
     units_map: dict[str,str] = field(default_factory=dict)
 
-    def diff(self, other:ForgejoRolePermissionDefinition) -> str :
+    def diff(self, other:"ForgejoRolePermissionDefinition") -> str :
         """Provide an equality check against an-other role permission. Just
            the differences are shown which makes it easier to see what has changed"""
         return diff_dataclasses(self,other)
@@ -125,8 +125,8 @@ class ForgejoTeamDefinition:
     allow_empty: bool | None # Only None when built from an existing team
 
     @staticmethod
-    def from_team(team:Team, role_builder:ForgejoTeamRoleBuilder,
-                 require_exact:bool=False) -> ForgejoTeamDefinition:
+    def from_team(team:Team, role_builder:"ForgejoTeamRoleBuilder",
+                 require_exact:bool=False) -> "ForgejoTeamDefinition":
         """Will find a team definition closest matching the team provided according
            to the rules in role_builder.
            If require_exact is true, then if none are found, one will be created"""
@@ -147,7 +147,7 @@ class ForgejoTeamDefinition:
 
         raise ValueError("Role builder not available")
 
-    def diff(self, other:ForgejoTeamDefinition) -> str :
+    def diff(self, other:"ForgejoTeamDefinition") -> str :
         """Provide an equality check against an-other role permission. Just
            the differences are shown which makes it easier to see what has changed"""
         return diff_dataclasses(self,other)

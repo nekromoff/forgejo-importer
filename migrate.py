@@ -4,11 +4,10 @@
 # and collaborators from GitLab to Forgejo
 #
 """
-Usage: migrate.py [--debug] [--users] [--groups] [--projects] [--membership] [--all] [--notify]
+Usage: migrate.py [--debug] [--users] [--groups] [--projects] [--membership] [--attachments] [--all] [--notify] [--refresh-cache] [--from-start]
        migrate.py --help
 
-Migration script to import users, groups, projects, and group/user membership
-of projects from any Source System to Forgejo.
+Migrates users, groups, projects, their members and attachments from GitLab to Forgejo.
 
 Options
   -h, --help    Show this screen
@@ -17,20 +16,29 @@ Options
   --groups      migrate groups
   --projects    migrate projects
   --membership  migrate project membership
+  --attachments    copy files linked in issues, merge requests and comments (e.g.
+                   pasted images) into Forgejo and fix the links (migrated projects)
   --all         migrate all
   --notify      send notification to users
+  --refresh-cache  ignore cached source system data (users, groups, projects,
+                   members) and fetch it again
+  --from-start     go over all items of each step, instead of continuing at the
+                   item where the last (interrupted) run of that step stopped
 """
 import os
+import time
 import configparser
 
 from docopt import docopt
 
 
 from fg_migration.adapters.forgeo_types import ForgejoApiBuilder
-from fg_migration.core.migration_source import SourceFactory
-from fg_migration.core.config_types import (ForgejoConfig, MigrationConfig)
+from fg_migration.core.config_types import ForgejoConfig
 from fg_migration.adapters.destination_forgjo import ForgejoDestination
 from fg_migration.services.migrator import Migrator
+from fg_migration.services.attachment_migrator import AttachmentMigrator
+from fg_migration.core.caching_source import build_gitlab_source
+from fg_migration.core.json_cache import JsonCache
 
 from fg_migration.utils import fg_print
 
@@ -49,7 +57,6 @@ def main() -> int:
 
     config = configparser.RawConfigParser()
     config.read(".migrate.ini")
-    migration_config = MigrationConfig.from_config(config=config)
     forgejo_config = ForgejoConfig.from_config(config=config)
 
     #######################
@@ -65,14 +72,12 @@ def main() -> int:
         fg_print.Bcolors.HEADER, "---=== Migration to Forgejo ===---"
     )
     fg_print.info(f"Version: {SCRIPT_VERSION}\n")
+    start_time = time.time()
 
 
     try:
-        migration_source = SourceFactory.build_migration_source(config=config,
-                                                                migration_config=migration_config)
-    except ValueError as e:
-        fg_print.error(f"{e}")
-        return 1
+        migration_source = build_gitlab_source(config=config,
+                                               refresh_cache=bool(args["--refresh-cache"]))
     except ConnectionError:
         return 2
 
@@ -85,8 +90,7 @@ def main() -> int:
 
     migration_dest : ForgejoDestination = ForgejoDestination(fg_api=fg_api,
                                                              forgejo_config=forgejo_config)
-    migrator = Migrator(migration_config=migration_config,
-                        migration_source=migration_source,
+    migrator = Migrator(migration_source=migration_source,
                         migration_dest=migration_dest,
                         fg_api_builder=fg_api_builder)
 
@@ -94,9 +98,20 @@ def main() -> int:
     run_groups = args["--groups"] or args["--all"]
     run_projects = args["--projects"] or args["--all"]
     run_membership = args["--membership"] or args["--all"]
+    run_attachments = args["--attachments"] or args["--all"]
+
+    # where each step stopped, so an interrupted step continues from there
+    from_start = bool(args["--from-start"])
+    checkpoint_cache = JsonCache(cache_dir=os.path.join(migration_source.cache.cache_dir,
+                                                        "checkpoints"),
+                                 max_age_hours=24 * 365,
+                                 identity=migration_source.cache.identity,
+                                 secrets={})
+    migrator.checkpoint_cache = checkpoint_cache
+    migrator.from_start = from_start
 
     # IMPORT NOTHING ?
-    if not (run_users or run_groups or run_projects or run_membership):
+    if not (run_users or run_groups or run_projects or run_membership or run_attachments):
         fg_print.info("")
         fg_print.warning("No migration option(s) selected, nothing to do")
         return 0
@@ -114,6 +129,11 @@ def main() -> int:
         # IMPORT Repositories (Projects) AND OR Collaborators (Memberships of Projects)
         if run_projects or run_membership:
             migrator.import_repos(import_repo_content=run_projects)
+        if run_attachments:
+            AttachmentMigrator(migration_source=migration_source, migration_dest=migration_dest,
+                               done_cache=migration_source.cache,
+                               checkpoint_cache=checkpoint_cache,
+                               from_start=from_start).migrate_attachments()
     except Exception as e:
         fg_print.error(str(e))
         return 1
@@ -121,6 +141,7 @@ def main() -> int:
         migrator.close()
 
     fg_print.info("")
+    fg_print.info(f"Total time: {fg_print.format_duration(time.time() - start_time)}")
     if fg_print.GLOBAL_ERROR_COUNT == 0:
         fg_print.success("Migration finished with no errors")
     else:
@@ -129,13 +150,6 @@ def main() -> int:
         print(*fg_print.GLOBAL_ERROR_LIST, sep="\n")
         return 1
     return 0
-
-
-
-#
-# Data loading helpers for Forgejo
-#
-
 
 
 

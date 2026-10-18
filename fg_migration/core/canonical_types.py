@@ -72,7 +72,7 @@ class CanonicalOrganizations:
        of the source type which is typically a plural of the CanonicalOrganization
        source type (used in logging)"""
     source_type:str # what is this type defined as at source e.g. for gitlab, Groups
-    members:list[CanonicalOrganization] = field(default_factory=list)
+    members:list["CanonicalOrganization"] = field(default_factory=list)
 
 
 
@@ -131,8 +131,8 @@ class CanonicalRepoMembership:
        org/team-d-descendant-descendant or org/team-s-sub for example, thus flattening a deep
        nested team / group structure in the source system."""
     username:str
-    repository:CanonicalRepo
-    hierarchy:list[HierarchyNode] | None
+    repository:"CanonicalRepo"
+    hierarchy:list["HierarchyNode"] | None
     access_level:str
 
     def get_safe_username(self) -> str:
@@ -144,7 +144,7 @@ class HierarchyNode:
     """Define the Source system hierachy of some Canonical Object as
        explained in the class CanonicalRepoMembership"""
     name: str
-    relation: RelationEnum|None = None
+    relation: "RelationEnum|None" = None
 
     class RelationEnum(StrEnum):
         "Type of hierarchy node"
@@ -192,10 +192,13 @@ class CanonicalRepo:
     source_id:str
     # source_type - what is this type defined as at source e.g. for gitlab, Project
     source_type: str = "Repository"
+    # archived (read only) in the source system, so it should be archived in Forgejo too
+    is_archived: bool = False
 
     def get_safe_username(self) -> str:
-        """Get Forgejo safe username"""
-        return name_clean(self.name)
+        """Get Forgejo safe username: the source path (e.g. GitLab project path
+           my-project), not the display name (My Project), so urls stay the same"""
+        return name_clean(self.username)
 
     def get_safe_owner_name(self) -> str:
         """Get Forgejo safe owner name"""

@@ -1,71 +1,42 @@
 """Only contains the Migrator - a migration engine from system x to Forgejo"""
 import base64
+import time
 
 from pyforgejo import Repository
 import requests
 
 from fg_migration.strategies.access_level_mapping_strategy import AccessLevelAccessMappingStrategy
-from fg_migration.strategies.direct_collaborator_strategy import DirectCollaboratorOnlyStrategy
-from fg_migration.strategies.existing_forgejo_preserving_strategy \
-                                    import ExistingForgejoPreservingStrategy
-from fg_migration.strategies.flattened_hierarchy_strategy import FlattenedHierarchyStrategy
-from fg_migration.strategies.strict_access_level_mapping_strategy \
-                                    import StrictAccessLevelMappingStrategy
 from fg_migration.utils import fg_print
 from fg_migration.strategies.access_mapping_strategy import AccessMappingStrategy
 from fg_migration.adapters.forgeo_types import (ForgejoApiBuilder, ForgejoPermission,
                                                 IterativeFetchError)
-from fg_migration.core.migration_source_type import MigrationSource
+from fg_migration.core.caching_source import CachedGitLabSource
 from fg_migration.core.canonical_types import (CanonicalOrganizations, CanonicalRepo,
                                                CanonicalSystemUser)
-from fg_migration.adapters.destination_forgjo import ForgejoDestination
-from fg_migration.core.config_types import MigrationConfig
+from fg_migration.adapters.destination_forgjo import ForgejoDestination, RepoMigrationStillRunning
+from fg_migration.core.checkpoint import Checkpoint
+from fg_migration.core.json_cache import JsonCache
 
 
 class Migrator:
-    """This class is the migration engine mapping data from MigrationSource implementation
-        to the ForgejoDestination implementation"""
+    """The migration engine, loading the data of the GitLab source into Forgejo"""
 
-    migration_config : MigrationConfig
     migration_dest : ForgejoDestination
-    migration_source: MigrationSource
+    migration_source: CachedGitLabSource
     fg_api_builder : ForgejoApiBuilder
     access_mapping_strategy: AccessMappingStrategy
+    # where checkpoints are kept, so a rerun of a step continues where it stopped
+    checkpoint_cache: JsonCache | None = None
+    from_start: bool = False
 
-    def __init__(self,
-                 migration_config:MigrationConfig, migration_source:MigrationSource,
+    def __init__(self, migration_source:CachedGitLabSource,
                  migration_dest:ForgejoDestination, fg_api_builder:ForgejoApiBuilder):
         self.migration_dest = migration_dest
-        self.migration_config = migration_config
         self.migration_source = migration_source
         self.fg_api_builder = fg_api_builder
-
-        strategy_id = migration_config.ACCESS_MAPPING_STRATEGY
-        match strategy_id:
-            case "access_level":
-                strategy = AccessLevelAccessMappingStrategy(
-                                                    migration_dest=self.migration_dest,
-                                                    migration_config=self.migration_config)
-            case "strict_access_level":
-                strategy = StrictAccessLevelMappingStrategy(
-                                                    migration_dest=self.migration_dest,
-                                                    migration_config=self.migration_config)
-            case "no_teams":
-                strategy = DirectCollaboratorOnlyStrategy(
-                                                    migration_dest=self.migration_dest,
-                                                    migration_config=self.migration_config)
-            case "preserve_existing_teams":
-                strategy = ExistingForgejoPreservingStrategy(
-                                                    migration_dest=self.migration_dest,
-                                                    migration_config=self.migration_config)
-            case "flatten_source_team_hierarchy":
-                strategy = FlattenedHierarchyStrategy(
-                                                    migration_dest=self.migration_dest,
-                                                    migration_config=self.migration_config)
-            case _:
-                raise ValueError(f"Unexpected strategy_id: {strategy_id}")
-        self.access_mapping_strategy = strategy
-        fg_print.info(f"Using teams and users mapping strategy : {strategy.__class__.__name__}")
+        # one Forgejo team per GitLab access level, see AccessLevelAccessMappingStrategy
+        self.access_mapping_strategy = AccessLevelAccessMappingStrategy(
+                                                    migration_dest=self.migration_dest)
         self.run_logic_checks()
 
 
@@ -90,12 +61,12 @@ class Migrator:
                 owner_count += 1
         match owner_count:
             case 0:
-                fg_print.error("A single OWNER role with owner permission MUST be defined in the fogrejo_user_roles.yaml file")
+                fg_print.error("A single OWNER role with owner permission MUST be defined in roles.py")
                 raise ValueError()
             case 1:
                 pass
             case _:
-                fg_print.error("More than the permitted one OWNER role with owner permission has been defined in the fogrejo_user_roles.yaml file")
+                fg_print.error("More than the permitted one OWNER role with owner permission has been defined in roles.py")
                 raise ValueError()
 
 
@@ -293,8 +264,9 @@ class Migrator:
 
 
 
-    def _run_inbuilt_repo_import(self, source_repo: CanonicalRepo):
-        """Run the inbuilt import on the project"""
+    def _run_inbuilt_repo_import(self, source_repo: CanonicalRepo) -> bool:
+        """Run the inbuilt import on the project.
+           False if Forgejo is still migrating it in the background"""
 
         # get either the Forgejo User or Organization name as appropriate
         # for this gitlab project owner
@@ -308,7 +280,7 @@ class Migrator:
                 f"Importing {source_repo.source_system} {source_repo.name}."
                 f" Failed to locate Forgejo repository owner for repository "
                 f"{source_repo.get_safe_username()}")
-            return
+            return True
 
 
         if not forgejo_owner.is_complete():
@@ -319,16 +291,21 @@ class Migrator:
                 f"Importing {source_repo.source_system} {source_repo.name}. "
                 f"Located incomplete Forgejo repository owner for repository"
                 f" {source_repo.get_safe_username()}")
-            return
+            return True
 
 
         if not self.migration_dest.forgejo_repo_exists(forgejo_owner=forgejo_owner,
                                                        repo=source_repo):
 
             fg_print.info(f"Importing {source_repo.source_system} {source_repo.source_type}"
-                          f" {source_repo.name} from {source_repo.clone_url}...")
+                          f" {source_repo.name} from {source_repo.clone_url} (git data, wiki,"
+                          " issues, labels, milestones, merge requests, releases)."
+                          " This runs on the Forgejo server and can take several minutes,"
+                          " please wait...")
+            migrate_start = time.time()
 
-            imported_repo : Repository = self.migration_dest.repo_migrate(
+            try:
+                imported_repo : Repository | None = self.migration_dest.repo_migrate(
                                         source_repo=source_repo,
                                         forgejo_owner=forgejo_owner,
                                         service="gitlab",
@@ -340,11 +317,18 @@ class Migrator:
                                         releases=True,
                                         wiki=True,
                                 )
+            except RepoMigrationStillRunning as e:
+                fg_print.warning(str(e))
+                return False
+            took = fg_print.format_duration(time.time() - migrate_start)
             if imported_repo is not None:
-                fg_print.info(
+                fg_print.success(
                     f"{source_repo.source_system} {source_repo.source_type}"
-                    f" {source_repo.get_safe_username()} imported from {source_repo.clone_url}"
-                    f" and available at {imported_repo.clone_url}")
+                    f" {source_repo.get_safe_username()} imported in {took} from"
+                    f" {source_repo.clone_url} and available at {imported_repo.clone_url}")
+            else:
+                fg_print.info(f"Import of {source_repo.get_safe_username()} ended after {took}")
+        return True
 
 
 
@@ -409,16 +393,25 @@ class Migrator:
 
     def import_users(self, notify=False):
         """import users and their public keys"""
+        source_name = self.migration_source.get_source_system_name()
+        fg_print.section("Users")
+        fg_print.info(f"Collecting users from {source_name}, this can take a while...")
         # read all users
         users: list[CanonicalSystemUser] = self.migration_source.list_system_users()
 
-        fg_print.info(f"Found {len(users)} {self.migration_source.get_source_system_name()} users")
+        fg_print.info(f"Found {len(users)} {source_name} users, importing them into Forgejo")
 
         user : CanonicalSystemUser
-        for user in users:
+        total = len(users)
+        checkpoint = Checkpoint(self.checkpoint_cache, "users", self.from_start)
+        start = checkpoint.resume_index([user.username for user in users])
+        for index, user in enumerate(users, start=1):
+            if index <= start:
+                continue
+            checkpoint.mark(user.username)
 
-            fg_print.info(f"Importing {user.source_system} user {user.username}"
-                          f" as {user.get_safe_username()}...")
+            fg_print.progress(index, total, f"Importing {user.source_system} user {user.username}"
+                                            f" as {user.get_safe_username()}...")
 
             fg_print.info(f"Found {len(user.gpg_keys)} gpg keys for user {user.username}")
             fg_print.info(f"Found {len(user.keys)} public keys for user {user.username}")
@@ -463,6 +456,7 @@ class Migrator:
 
         # Now print all the newly created users details (so they can be
         #  copied and pasted as needed into a spreadsheet perhaps)
+        checkpoint.finish()
         self._list_user_details(users=users)
 
 
@@ -479,7 +473,7 @@ class Migrator:
             f"Full Name"
         )
 
-        fg_print.warning("\n\Migrated user details:\n")
+        fg_print.warning("\n\nMigrated user details:\n")
         fg_print.warning(header)
         fg_print.warning("-" * len(header))
 
@@ -522,6 +516,9 @@ class Migrator:
 
     def import_organizations(self):
         """import all organizations and their members"""
+        fg_print.section("Groups / Organizations")
+        fg_print.info(f"Collecting groups from {self.migration_source.get_source_system_name()},"
+                      " this can take a while...")
         # read all users
         canonical_organizations: CanonicalOrganizations = self.migration_source.list_organizations()
 
@@ -533,10 +530,17 @@ class Migrator:
         fg_print.info(f"Importing groups... {group_names}")
 
 
-        for organization in canonical_organizations.members:
+        total = len(canonical_organizations.members)
+        checkpoint = Checkpoint(self.checkpoint_cache, "groups", self.from_start)
+        start = checkpoint.resume_index([org.username for org in canonical_organizations.members])
+        for index, organization in enumerate(canonical_organizations.members, start=1):
+            if index <= start:
+                continue
+            checkpoint.mark(organization.username)
             # create the Forgejo organization
-            fg_print.info(f"Importing {organization.source_type} {organization.username}"
-                          f" as Forgejo organization {organization.get_safe_username()}...")
+            fg_print.progress(index, total,
+                              f"Importing {organization.source_type} {organization.username}"
+                              f" as Forgejo organization {organization.get_safe_username()}...")
 
             # This individual retrieval replaces a search through the list. I'm not sure
             # if it'll use more time and be less reliable (more api calls)...
@@ -557,6 +561,7 @@ class Migrator:
                 continue # org does not exist
 
             # Finally, import those group members
+            fg_print.info(f"Importing teams and members of {organization.get_safe_username()}...")
             self.access_mapping_strategy.import_teams(migration_source=self.migration_source,
                                                       organization=organization)
 
@@ -566,10 +571,27 @@ class Migrator:
         """read all projects and their issues if import_repo_content is True.
            Always applies Collabroration rights"""
 
+        fg_print.section("Projects / Repositories" if import_repo_content
+                         else "Project membership")
+        fg_print.info(f"Collecting projects from {self.migration_source.get_source_system_name()},"
+                      " this can take a while...")
         source_repos : list[CanonicalRepo] = self.migration_source.list_repositories()
+        fg_print.info(f"Found {len(source_repos)} projects")
 
         source_repo : CanonicalRepo
-        for source_repo in source_repos:
+        total = len(source_repos)
+        checkpoint = Checkpoint(self.checkpoint_cache,
+                                "projects" if import_repo_content else "membership",
+                                self.from_start)
+        start = checkpoint.resume_index([str(repo.source_id) for repo in source_repos])
+        for index, source_repo in enumerate(source_repos, start=1):
+            if index <= start:
+                continue
+            checkpoint.mark(str(source_repo.source_id),
+                            f"{source_repo.owner_name}/{source_repo.name}")
+            fg_print.progress(index, total, f"Project {source_repo.owner_name}/{source_repo.name}"
+                                            + (" (archived)" if source_repo.is_archived else ""))
+            still_migrating = False
 
             if import_repo_content:
                 if source_repo.is_individual:
@@ -580,7 +602,8 @@ class Migrator:
                                   f" from owner {source_repo.owner_name}")
 
                 # import project repo
-                self._run_inbuilt_repo_import(source_repo=source_repo)
+                if not self._run_inbuilt_repo_import(source_repo=source_repo):
+                    still_migrating = True
 
                 # Handled by inbuilt repo migration
                 # import labels
@@ -605,6 +628,19 @@ class Migrator:
                 #              f" from owner {source_repo.owner_name} *Contents*")
                 pass
             # Always configure the accessors.
+            fg_print.info(f"Applying access rights (members, teams) for {source_repo.name}...")
             self.access_mapping_strategy.import_repository_accessors(
                                                 migration_source=self.migration_source,
                                                 source_repo=source_repo)
+
+            # archive last, an archived Forgejo repository rejects some changes
+            if source_repo.is_archived and still_migrating:
+                fg_print.warning(f"Not archiving {source_repo.name} while Forgejo is still"
+                                 " migrating it, rerun with --membership later to archive it")
+            elif source_repo.is_archived:
+                forgejo_owner = self.migration_dest.resolve_forgejo_repo_owner(
+                                                                    source_repo=source_repo)
+                if forgejo_owner is not None and forgejo_owner.is_complete():
+                    self.migration_dest.forgejo_archive_repo(forgejo_owner=forgejo_owner,
+                                                             repo=source_repo)
+        checkpoint.finish()

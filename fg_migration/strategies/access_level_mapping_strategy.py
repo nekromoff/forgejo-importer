@@ -14,7 +14,7 @@ from fg_migration.core.canonical_types import (CanonicalOrganizationMembership,
                                                CanonicalUser)
 from fg_migration.adapters.forgeo_types import (ForgejoPermission, ForgejoTeamDefinition,
                                                 IterativeFetchError)
-from fg_migration.core.migration_source_type import MigrationSource
+from fg_migration.core.caching_source import CachedGitLabSource
 from fg_migration.utils.utils import name_clean
 
 
@@ -59,9 +59,7 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
         forgejo-auditors
             └── <no members>
 
-    The empty "forgejo-auditors" team may still be created when
-    ADD_EMPTY_TEAMS_TO_ORGANIZATIONS is enabled and the team definition
-    allows empty teams.
+    The empty "forgejo-auditors" team is not created.
 
     Repository access example
     -------------------------
@@ -76,32 +74,18 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
 
     rather than creating individual repository collaborators.
 
-    Empty teams can also be attached to repositories when
-    ADD_EMPTY_TEAMS_TO_REPOSITORIES is enabled:
-
-        project-a
-            ├── forgejo-maintainers
-            ├── forgejo-developers
-            ├── forgejo-guests
-            └── forgejo-auditors (0 members)
-
-    This allows predefined permission structures to exist in Forgejo even when
-    no users currently occupy a given role.
-
     Direct collaborators are only used as a fallback when a user cannot be
     represented through a team-based access mapping.
 
     Behaviour:
-    - Creates or reuses Forgejo teams mapped from source access levels.
-    - Optionally creates configured empty teams even when no source users map
-      to them.
+    - Creates or reuses Forgejo teams mapped from source access levels. An existing team
+      of the same name is reused, its members keep their access.
     - Imports organization membership by assigning users to the appropriate
       access-level team.
     - Grants repository access through teams for organization-owned repositories.
-    - Optionally grants repository access to empty teams.
     - Falls back to direct repository collaborators only for users not covered
       by team-based access.
-    - Supports fuzzy role/team mapping when enabled by migration configuration.
+    - Access levels without a role in roles.py are skipped with a warning.
     - Preserves team-based authorization intent by avoiding automatic conversion
       of failed team assignments into individual collaborator assignments.
     """
@@ -128,14 +112,6 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
 
 
     @dataclass
-    class TeamMatchRenamedResult(TeamMatchResult):
-        """See super type definition"""
-        renamed_team: Team
-        old_name: str
-
-
-
-    @dataclass
     class TeamSearchResult:
         """Result of finding team to add members to"""
         team:Team
@@ -145,7 +121,7 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
 
 
     @override
-    def import_teams(self, migration_source: MigrationSource, organization: CanonicalOrganization):
+    def import_teams(self, migration_source: CachedGitLabSource, organization: CanonicalOrganization):
         """Create Forgejo teams as a projection of canonical membership facts"""
 
         existing_forgejo_org_teams_map: dict[str, Team] # map[Team.name.lower() : Team]
@@ -208,26 +184,10 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
                 is_new_team=team_result.is_new_team,
             )
 
-        # ----------------------------------------------------------------------------
-        # STEP 4: add any teams with no members defined in the teams config yaml file.
-        # ----------------------------------------------------------------------------
-        if self.migration_config.ADD_EMPTY_TEAMS_TO_ORGANIZATIONS is True:
-            for possible_team in self.migration_dest.get_default_team_definitions():
-                if possible_team.name.lower() in existing_forgejo_org_teams_map:
-                    # already existed before this operation started
-                    continue
-
-                if possible_team.allow_empty:
-                    self._safely_add_new_team(organization=organization,
-                                              team_definition=possible_team)
-                else:
-                    fg_print.info(f"Skipped adding empty team {possible_team.name} because"
-                                  " defined as empty not allowed in team definitions yaml file")
-
 
 
     def _get_forgejo_team_for_members_add(self,
-                    migration_source:MigrationSource,
+                    migration_source:CachedGitLabSource,
                     organization:CanonicalOrganization,
                     access_level:str,
                     memberships:list[CanonicalOrganizationMembership],
@@ -237,7 +197,6 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
         forgejo_team_definition = self._get_forgejo_team_definition(
             migration_source=migration_source,
             source_access_level=access_level,
-            fuzzy=self.migration_config.IS_FUZZY_TEAMS_ALLOWED,
         )
 
         if forgejo_team_definition is None:
@@ -261,14 +220,7 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
             fg_print.error("skipping import of access level due to match failure...")
             return None
 
-        if isinstance(match_result, self.TeamMatchRenamedResult):
-            # Team was moved, remove old mapping and add a new one
-            del existing_forgejo_org_teams_map[match_result.old_name.lower()]
-            existing_forgejo_org_teams_map[match_result.renamed_team.name.lower()] = \
-                                                                match_result.renamed_team
-            # Now no team matches the name we renamed from
-            existing_team = None
-        elif isinstance(match_result, self.TeamMatchExactResult):
+        if isinstance(match_result, self.TeamMatchExactResult):
             existing_team = match_result.matched_team
         elif isinstance(match_result, self.TeamMatchNoResult):
             is_new_team = True
@@ -291,7 +243,7 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
     @override
     def import_repository_accessors(
         self,
-        migration_source: MigrationSource,
+        migration_source: CachedGitLabSource,
         source_repo: CanonicalRepo,
     ):
         """Import all teams or individuals that should have access to a repository"""
@@ -433,10 +385,8 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
                         continue
 
                     if len(member_usernames) == 0:
-                        #if the team is empty....
-                        if self.migration_config.ADD_EMPTY_TEAMS_TO_REPOSITORIES is not True:
-                            # Don't add this one to the the repository unless user wanted
-                            continue
+                        # empty teams get no repository access
+                        continue
 
                     if not org_team.id in existing_repo_team_ids:
 
@@ -477,7 +427,7 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
 
     def handle_missing_accessors(
         self,
-        migration_source: MigrationSource,
+        migration_source: CachedGitLabSource,
         source_repo: CanonicalRepo,
         repo_accessors: CanonicalRepoMemberships,
         all_team_usernames: set[str],
@@ -554,54 +504,12 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
                           f" Team {matched_team.name}")
             return self.TeamMatchExactResult(matched_team=matched_team)
 
-        if self.migration_config.USE_EXISTING_TEAMS is True:
-            fg_print.warning("Pre-existing team users will be granted access to new repositories"
-                             " that are created with access granted to this team.\n"
-                             f"Affected Forgejo Organization {organization.get_safe_username()}"
-                             f" Team {matched_team.name}, usernames: {existing_usernames}")
-            return self.TeamMatchExactResult(matched_team=matched_team)
-
-        # don't want to alter the existing team, rename it so we can create a new
-        # one using its name.
-        result = self._rename_team_out_of_the_way(team = matched_team)
-
-        return result
-
-
-    def _rename_team_out_of_the_way(self,
-                                    team: Team,
-                                    ) -> TeamMatchRenamedResult | None:
-
-        current_definition = ForgejoTeamDefinition.from_team(
-            team=team,
-            role_builder=self.migration_dest.forgejo_team_to_role_mapper,
-            require_exact=True,
-        )
-
-        new_definition = deepcopy(current_definition)
-        new_definition.name += name_clean(
-            f"_pre_migrate_{self.migration_config.MIGRATION_DATE_TIME}"
-        )
-
-        updated_team = self.migration_dest.forgejo_update_organization_team(
-            team=team,
-            current_definition=current_definition,
-            new_definition=new_definition,
-        )
-
-        if updated_team is not None:
-            fg_print.debug(f"Success: Moved team with name {team.name} out of the way to allow "
-                           "creation of new team with the same name for import. Renamed team "
-                           f"to {updated_team.name}")
-        else:
-            fg_print.debug(f"Failed: Moved team with name {team.name} out of the way to allow "
-                           "creation of new team with the same name for import.")
-
-        if updated_team is not None:
-            return self.TeamMatchRenamedResult(renamed_team=updated_team, old_name=team.name)
-
-        # return self.TeamMatchExactResult(matched_team=team)
-        return None # Team does exist, but we clearly didn't want to use it
+        # an existing team of the same name is reused, its members keep their access
+        fg_print.warning("Pre-existing team users will be granted access to new repositories"
+                         " that are created with access granted to this team.\n"
+                         f"Affected Forgejo Organization {organization.get_safe_username()}"
+                         f" Team {matched_team.name}, usernames: {existing_usernames}")
+        return self.TeamMatchExactResult(matched_team=matched_team)
 
 
 

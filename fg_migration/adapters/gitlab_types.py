@@ -49,10 +49,14 @@ class GitLabApiPaginator:
                             raise
                         time.sleep(2 ** attempt)
                 yield from page_of_data
-                page_idx += 1
                 if len(page_of_data) < self.max_page_size:
                     # no more to load
                     break
+                # long lists take a while, so report as each further page is requested
+                fg_print.print_color(fg_print.Bcolors.DIM,
+                                     f"  ... loaded {page_idx * self.max_page_size} "
+                                     f"{self.items_type} so far, loading more...")
+                page_idx += 1
         except Exception as e:
             msg = f"Failed to retrieve existing {self.items_type} page[{page_idx}]" \
                   f"{self.retrieval_detail} {e}"
@@ -76,10 +80,15 @@ class GitLabApiBuilder:
             cert_path = self.config.GITLAB_CLIENT_AUTH_CERT
             key_path = self.config.GITLAB_CLIENT_AUTH_KEY
             session.cert = (cert_path, key_path)
+        # python-gitlab waits silently when rate limited, so say why nothing happens
+        session.hooks["response"].append(self._report_rate_limit)
         # private token or personal token authentication
         gl = gitlab.Gitlab(url = self.config.GITLAB_URL,
                            private_token=self.config.GITLAB_TOKEN,
-                           session=session)
+                           session=session,
+                           # without a timeout a stalled connection hangs forever
+                           timeout=self.config.REQUEST_TIMEOUT,
+                           retry_transient_errors=True)
         try:
             gl.auth()
         except gitlab.GitlabAuthenticationError:
@@ -91,6 +100,23 @@ class GitLabApiBuilder:
             os.sys.exit(1)
         assert isinstance(gl.user, gitlab.v4.objects.CurrentUser)
         return gl
+
+
+    @staticmethod
+    def _report_rate_limit(response: requests.Response, *_args, **_kwargs) -> None:
+        """requests response hook, reporting when GitLab throttles us (HTTP 429)"""
+        if response.status_code != 429:
+            return
+        wait = response.headers.get("Retry-After")
+        if wait is None and "RateLimit-Reset" in response.headers:
+            try:
+                wait = max(0, int(int(response.headers["RateLimit-Reset"]) - time.time()))
+            except ValueError:
+                wait = None
+        endpoint = response.request.path_url.split("?")[0] if response.request else ""
+        fg_print.warning(f"GitLab rate limit reached ({endpoint}), waiting "
+                         f"{f'{wait}s' if wait is not None else 'a moment'} before retrying...")
+
 
 
     def test_gitlab_connection(self, gl_api:gitlab.Gitlab):

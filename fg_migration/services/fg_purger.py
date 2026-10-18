@@ -45,6 +45,7 @@ class ForgejoPurger:
 
     def del_orgs_repos(self, page: int=1) -> None:
         """Delete all repositories in all organizations"""
+        fg_print.section("Deleting all organization repositories")
 
         while True:
             orgs = self.forgejo_api.organization.org_get_all(page=page)
@@ -52,6 +53,7 @@ class ForgejoPurger:
             if len(orgs) == 0:
                 break
             for org in orgs:
+                fg_print.info(f"Organization {org.username}: deleting its repositories...")
                 self.delete_all_repos_for_org(org=org)
 
 
@@ -78,6 +80,7 @@ class ForgejoPurger:
 
     def del_orgs(self, page: int=1) -> None:
         """Delete all organizations"""
+        fg_print.section("Deleting all organizations")
 
         while True:
             orgs = self.forgejo_api.organization.org_get_all(page=page)
@@ -96,6 +99,7 @@ class ForgejoPurger:
 
     def del_all_user_repos(self, page: int=1) -> None:
         """Delete all user repositories"""
+        fg_print.section("Deleting all user repositories")
         while True:
             users = self.forgejo_api.admin.search_users(page=page)
             page+=1
@@ -131,6 +135,7 @@ class ForgejoPurger:
 
     def del_current_user_repos(self, page: int=1) -> None:
         """Delete all current user repositories"""
+        fg_print.section("Deleting repositories of the current user")
 
         while True:
             repos = self.forgejo_api.user.current_list_repos(page=page)
@@ -155,6 +160,7 @@ class ForgejoPurger:
 
     def del_users(self, purge: bool, page:int=1) -> None:
         """Delete all users"""
+        fg_print.section("Deleting all users")
         while True:
             users = self.forgejo_api.admin.search_users(page=page)
             page+=1

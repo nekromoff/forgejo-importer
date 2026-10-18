@@ -4,6 +4,7 @@ import os
 import random
 import string
 from typing import Iterator
+import httpx
 from pyforgejo.core import RequestOptions
 from requests import RequestException
 from typing_extensions import deprecated
@@ -19,19 +20,24 @@ from pyforgejo import (ConflictError, GpgKey, Issue, Label,
                        MigrateRepoOptionsService, Milestone,
                       NotFoundError, Organization, PublicKey, Repository, Team, User)
 from pyforgejo.core.api_error import ApiError
-import yaml
 
 from fg_migration.utils import fg_print
 from fg_migration.core.canonical_types import (CanonicalOrganization, CanonicalRepo,
                                                CanonicalRepoMembership,
                                                CanonicalRepoOwner, CanonicalSystemUser)
 from fg_migration.core.config_types import ForgejoConfig
+from fg_migration.core.roles import FORGEJO_ROLES
 from fg_migration.adapters.forgeo_types import (ApiPaginator, ForgejoPermission,
                                                 ForgejoRepositoryRole,
                                                 ForgejoRolePermissionDefinition,
                                                 ForgejoTeamDefinition, ForgejoTeamRoleBuilder,
                                                 ForgejoTeamRoleMapper)
 from fg_migration.utils.utils import get_union_values_as_str
+
+
+class RepoMigrationStillRunning(Exception):
+    """Forgejo did not answer the repository migration in time. Forgejo keeps migrating
+       in the background (and deletes the repository if that fails)"""
 
 
 class ForgejoDestination:
@@ -50,7 +56,7 @@ class ForgejoDestination:
         self.fg_api = fg_api
         self.forgejo_config = forgejo_config
         (self.default_role_definitions,
-        self.default_team_definitions) = self.load_roles(path=forgejo_config.USER_ROLES_FILE_PATH)
+        self.default_team_definitions) = self.load_roles()
         self.role_definitions = deepcopy(self.default_role_definitions)
         self.team_definitions = deepcopy(self.default_team_definitions)
         self.forgejo_team_to_role_mapper = ForgejoTeamRoleMapper(
@@ -65,18 +71,15 @@ class ForgejoDestination:
 
 
 
-    def load_roles(self, path: str) -> tuple[dict[ForgejoRepositoryRole,
-                                                  ForgejoRolePermissionDefinition],
-                                             dict[ForgejoRepositoryRole,
-                                                  ForgejoTeamDefinition]]:
-        """Load the User roles and mappings from config files"""
-        with open(path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f)
-
+    def load_roles(self) -> tuple[dict[ForgejoRepositoryRole,
+                                       ForgejoRolePermissionDefinition],
+                                  dict[ForgejoRepositoryRole,
+                                       ForgejoTeamDefinition]]:
+        """The user roles and their teams, see roles.py"""
         role_definitions = {}
         team_definitions = {}
 
-        for role_id, role_cfg in cfg["roles"].items():
+        for role_id, role_cfg in FORGEJO_ROLES.items():
             role = ForgejoRepositoryRole(role_id)
 
             # Trim whitespace on cfg values just in case with strip()
@@ -370,6 +373,30 @@ class ForgejoDestination:
 
 
 
+    def forgejo_archive_repo(self, forgejo_owner: CanonicalRepoOwner, repo: CanonicalRepo) -> bool:
+        """Archive (make read only) a Forgejo repository, if not archived already"""
+        repo_name = repo.get_safe_username()
+        try:
+            repository = self.fg_api.repository.repo_get(owner=forgejo_owner.username,
+                                                         repo=repo_name)
+            if repository.archived:
+                fg_print.debug(f"Repository {forgejo_owner.username}/{repo_name}"
+                               " is already archived")
+                return True
+            self.fg_api.repository.repo_edit(owner=forgejo_owner.username, repo=repo_name,
+                                             archived=True)
+            fg_print.info(f"Repository {forgejo_owner.username}/{repo_name} archived, as"
+                          f" its {repo.source_system} {repo.source_type} is archived")
+            return True
+        except (ApiError, RequestException) as e:
+            detail = self._get_exception_detail(e)
+            fg_print.error(f"Failed to archive repository {forgejo_owner.username}/{repo_name}:"
+                           f" {detail}",
+                           f"Failed to archive repository {forgejo_owner.username}/{repo_name}")
+        return False
+
+
+
     @deprecated("Not currently used")
     def forgejo_label_exists(self, owner: str, repo: str, labelname: str) -> bool:
         """check if a label exists in a repository"""
@@ -636,7 +663,13 @@ class ForgejoDestination:
         service: MigrateRepoOptionsService | None = None,
         wiki: bool = True,
     ) -> Repository | None:
-        """Migrate a repository from the source service to Forgejo"""
+        """Migrate a repository from the source service to Forgejo.
+
+        Raises
+        ------
+            RepoMigrationStillRunning
+                If Forgejo did not answer within forgejo_migrate_timeout seconds
+        """
 
         try:
             fg_print.debug(f"Importing {source_repo.source_system} {source_repo.source_type}"
@@ -664,8 +697,18 @@ class ForgejoDestination:
                                                 service=service,
                                                 uid=forgejo_owner.id, # deprecated (only in for backwards compatability reasons)
                                                 wiki=wiki,
+                                                # migrating issues, wiki etc takes a while,
+                                                # far longer than the default timeout
+                                                request_options={"timeout_in_seconds":
+                                                        self.forgejo_config.MIGRATE_TIMEOUT},
                                         )
             return repo
+        except httpx.TimeoutException as e:
+            raise RepoMigrationStillRunning(
+                f"Forgejo did not finish migrating {source_repo.get_safe_username()} within"
+                f" {self.forgejo_config.MIGRATE_TIMEOUT}s. It keeps migrating in the background,"
+                " check the repository in Forgejo later (a rerun skips it once it exists)."
+                " Raise forgejo_migrate_timeout in .migrate.ini to wait longer") from e
         except (ApiError, RequestException) as e:
             detail = self._get_exception_detail(e)
             fg_print.error(f"{source_repo.source_system} {source_repo.source_type}"
