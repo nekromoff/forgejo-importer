@@ -15,7 +15,7 @@ Migrates users, groups, projects and access rights from GitLab (including gitlab
 - **Users:** accounts, emails, SSH keys, GPG keys, and avatars of newly created users. New users get a temporary password.
 - **Groups:** become Forgejo organizations, with their teams, members and roles mapped from GitLab access levels.
 
-Tested with GitLab 18.11 / 19.x (gitlab.com) and Forgejo 15.
+Tested with gitlab.com (GitLab 19.6) and Forgejo 17.0.
 
 ## Setup
 
