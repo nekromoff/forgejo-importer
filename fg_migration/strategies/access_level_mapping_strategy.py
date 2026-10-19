@@ -1,6 +1,5 @@
 """Defines the AccessLevelAccessMappingStrategy class"""
 from abc import ABC
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import override
 
@@ -14,8 +13,7 @@ from fg_migration.core.canonical_types import (CanonicalOrganizationMembership,
                                                CanonicalUser)
 from fg_migration.adapters.forgeo_types import (ForgejoPermission, ForgejoTeamDefinition,
                                                 IterativeFetchError)
-from fg_migration.core.caching_source import CachedGitLabSource
-from fg_migration.utils.utils import name_clean
+from fg_migration.core.caching_source import CachedSource
 
 
 class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
@@ -121,7 +119,7 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
 
 
     @override
-    def import_teams(self, migration_source: CachedGitLabSource, organization: CanonicalOrganization):
+    def import_teams(self, migration_source: CachedSource, organization: CanonicalOrganization):
         """Create Forgejo teams as a projection of canonical membership facts"""
 
         existing_forgejo_org_teams_map: dict[str, Team] # map[Team.name.lower() : Team]
@@ -187,7 +185,7 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
 
 
     def _get_forgejo_team_for_members_add(self,
-                    migration_source:CachedGitLabSource,
+                    migration_source:CachedSource,
                     organization:CanonicalOrganization,
                     access_level:str,
                     memberships:list[CanonicalOrganizationMembership],
@@ -243,7 +241,7 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
     @override
     def import_repository_accessors(
         self,
-        migration_source: CachedGitLabSource,
+        migration_source: CachedSource,
         source_repo: CanonicalRepo,
     ):
         """Import all teams or individuals that should have access to a repository"""
@@ -427,7 +425,7 @@ class AccessLevelAccessMappingStrategy(BaseAccessMappingStrategy):
 
     def handle_missing_accessors(
         self,
-        migration_source: CachedGitLabSource,
+        migration_source: CachedSource,
         source_repo: CanonicalRepo,
         repo_accessors: CanonicalRepoMemberships,
         all_team_usernames: set[str],

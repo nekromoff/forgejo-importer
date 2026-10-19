@@ -9,7 +9,7 @@ from fg_migration.adapters.forgeo_types import (ForgejoPermission, ForgejoReposi
                                                 ForgejoRolePermissionDefinition,
                                                 ForgejoTeamDefinition, IterativeFetchError)
 from fg_migration.core.canonical_types import CanonicalOrganization, CanonicalRepo, CanonicalRepoMemberships
-from fg_migration.core.caching_source import CachedGitLabSource
+from fg_migration.core.caching_source import CachedSource
 from fg_migration.strategies.access_mapping_strategy import AccessMappingStrategy
 from fg_migration.utils import fg_print
 
@@ -26,7 +26,7 @@ class BaseAccessMappingStrategy(AccessMappingStrategy):
     @override
     def resolve_forgejo_permission(
         self,
-        migration_source:CachedGitLabSource,
+        migration_source:CachedSource,
         source_access_level: str,
     ) -> ForgejoPermission | None:
 
@@ -43,7 +43,7 @@ class BaseAccessMappingStrategy(AccessMappingStrategy):
 
 
     def should_remove_migration_user_from_owners_team(self,
-                                                migration_source:CachedGitLabSource,
+                                                migration_source:CachedSource,
                                                 migration_username:str,
                                                 repo_accessors:CanonicalRepoMemberships) -> bool:
         """Is the migration user not supposed to have owner permission?"""
@@ -70,34 +70,34 @@ class BaseAccessMappingStrategy(AccessMappingStrategy):
 
 
 
-    def _get_forgejo_role_definition(self, migration_source:CachedGitLabSource,
+    def _get_forgejo_role_definition(self, migration_source:CachedSource,
                                      source_access_level:str,
                                      ) -> ForgejoRolePermissionDefinition | None:
-        """The ForgejoRoleDefinition of a GitLab access level, None if none is mapped"""
+        """The ForgejoRoleDefinition of a source access level, None if none is mapped"""
         repository_role : ForgejoRepositoryRole = migration_source.get_repository_role(
                                                         source_access_level=source_access_level)
         if repository_role.is_custom:
-            # not in GITLAB_ACCESS_LEVEL_ROLES in roles.py
-            fg_print.warning(f"No Forgejo role mapped for GitLab access level"
-                             f" {source_access_level} ({repository_role}), add it to"
-                             " GITLAB_ACCESS_LEVEL_ROLES in roles.py")
+            # not mapped in roles.py
+            fg_print.warning(f"No Forgejo role mapped for {migration_source.get_source_system_name()}"
+                             f" access level {source_access_level} ({repository_role}), add it"
+                             " to roles.py")
             return None
         return self.migration_dest.role_definitions[repository_role]
 
 
 
     def _get_forgejo_team_definition(self,
-                                     migration_source:CachedGitLabSource,
+                                     migration_source:CachedSource,
                                      source_access_level:str,
                                      ) -> ForgejoTeamDefinition | None:
-        """The ForgejoTeamDefinition of a GitLab access level, None if none is mapped"""
+        """The ForgejoTeamDefinition of a source access level, None if none is mapped"""
         repository_role : ForgejoRepositoryRole = migration_source.get_repository_role(
                                                     source_access_level=source_access_level)
         if repository_role.is_custom:
-            # not in GITLAB_ACCESS_LEVEL_ROLES in roles.py
-            fg_print.warning(f"No Forgejo team mapped for GitLab access level"
-                             f" {source_access_level} ({repository_role}), add it to"
-                             " GITLAB_ACCESS_LEVEL_ROLES in roles.py")
+            # not mapped in roles.py
+            fg_print.warning(f"No Forgejo team mapped for {migration_source.get_source_system_name()}"
+                             f" access level {source_access_level} ({repository_role}), add it"
+                             " to roles.py")
             return None
         return self.migration_dest.team_definitions[repository_role]
 

@@ -9,7 +9,7 @@ import gitlab.v4.objects
 import requests
 
 from fg_migration.utils import fg_print
-from fg_migration.core.config_types import GitLabConfig
+from fg_migration.core.config_types import SourceConfig
 
 
 class IterativeFetchError(Exception):
@@ -66,25 +66,25 @@ class GitLabApiPaginator:
 
 class GitLabApiBuilder:
     """A builder for the GitLab, configuring authentication etc in a central way"""
-    config : GitLabConfig
+    config : SourceConfig
 
-    def __init__(self, gitlab_config:GitLabConfig):
-        self.config = gitlab_config
+    def __init__(self, source_config:SourceConfig):
+        self.config = source_config
 
     def build_gitlab_api_client(self) -> gitlab.Gitlab:
         """Build a GitLab API Client using either the API key provided, or the default API key"""
         session = requests.Session()
         # add client authentication if cert and key are provided in the config
-        if(self.config.GITLAB_CLIENT_AUTH_CERT is not None
-           and self.config.GITLAB_CLIENT_AUTH_KEY is not None):
-            cert_path = self.config.GITLAB_CLIENT_AUTH_CERT
-            key_path = self.config.GITLAB_CLIENT_AUTH_KEY
+        if(self.config.CLIENT_AUTH_CERT is not None
+           and self.config.CLIENT_AUTH_KEY is not None):
+            cert_path = self.config.CLIENT_AUTH_CERT
+            key_path = self.config.CLIENT_AUTH_KEY
             session.cert = (cert_path, key_path)
         # python-gitlab waits silently when rate limited, so say why nothing happens
         session.hooks["response"].append(self._report_rate_limit)
         # private token or personal token authentication
-        gl = gitlab.Gitlab(url = self.config.GITLAB_URL,
-                           private_token=self.config.GITLAB_TOKEN,
+        gl = gitlab.Gitlab(url = self.config.URL,
+                           private_token=self.config.TOKEN,
                            session=session,
                            # without a timeout a stalled connection hangs forever
                            timeout=self.config.REQUEST_TIMEOUT,

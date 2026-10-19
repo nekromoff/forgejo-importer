@@ -1,5 +1,6 @@
-"""Copies files linked in migrated issues, merge requests and comments (e.g. pasted images)
+"""Copies files linked in migrated issues, merge / pull requests and comments (e.g. pasted images)
    from the source system into Forgejo, and points the links at the Forgejo copies"""
+import hashlib
 import io
 import re
 import time
@@ -17,25 +18,24 @@ from fg_migration.adapters.forgeo_types import ApiPaginator, IterativeFetchError
 from fg_migration.core.canonical_types import CanonicalRepo, CanonicalRepoOwner
 from fg_migration.core.checkpoint import Checkpoint
 from fg_migration.core.json_cache import JsonCache
-from fg_migration.core.caching_source import CachedGitLabSource
+from fg_migration.core.caching_source import CachedSource
 from fg_migration.utils import fg_print
 
-# GitLab upload links, as copied unchanged by the Forgejo migration, e.g.
-#   /uploads/<secret>/image.png                        (relative, the usual form)
-#   https://gitlab.example.com/group/project/uploads/<secret>/image.png
-#   https://gitlab.example.com/-/project/123/uploads/<secret>/image.png
-# Forgejo attachment links (/attachments/<uuid>) never match, so rewritten links are skipped
+# The upload links of the source (see upload_link_pattern of the sources) have the groups
+# secret (identifies the upload) and filename. Forgejo attachment links (/attachments/<uuid>)
+# never match, so rewritten links are skipped
+
 # returned by _upload for a file Forgejo will never accept (type or size), which is skipped
 SKIPPED = object()
 
-UPLOAD_LINK = re.compile(
-    r"(?:https?://[^\s()<>\"'\[\]]*?)?/uploads/(?P<secret>[0-9a-f]{32})/"
-    r"(?P<filename>[^\s()<>\"'\[\]?#]+)")
+# file signatures, for uploads linked without a file extension
+_EXTENSIONS = ((b"\x89PNG", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"GIF8", ".gif"),
+               (b"%PDF", ".pdf"), (b"PK\x03\x04", ".zip"))
 
 
 @dataclass
 class _Item:
-    """An issue, merge request or comment whose text links to source system uploads"""
+    """An issue, merge / pull request or comment whose text links to source system uploads"""
     kind: str # issue or comment
     label: str # for messages, e.g. issue #12
     forgejo_id: int # issue number or comment id
@@ -49,7 +49,7 @@ class AttachmentMigrator:
        issue or comment is reused (by name), rewritten links no longer match, and a repository
        is only marked done when all its links were migrated"""
 
-    def __init__(self, migration_source: CachedGitLabSource, migration_dest: ForgejoDestination,
+    def __init__(self, migration_source: CachedSource, migration_dest: ForgejoDestination,
                  done_cache: JsonCache | None, checkpoint_cache: JsonCache | None = None,
                  from_start: bool = False):
         self.migration_source = migration_source
@@ -57,6 +57,7 @@ class AttachmentMigrator:
         self.fg_api = migration_dest.fg_api
         self.page_size = migration_dest.forgejo_config.API_MAX_PAGE_SIZE
         self.done_cache = done_cache
+        self.link_pattern: re.Pattern = migration_source.upload_link_pattern()
         self.checkpoint = Checkpoint(checkpoint_cache, "attachments", from_start)
 
     def migrate_attachments(self) -> None:
@@ -105,11 +106,11 @@ class AttachmentMigrator:
         except IterativeFetchError:
             return False
         if not items:
-            fg_print.info("No uploaded files linked in issues, merge requests or comments")
+            fg_print.info("No uploaded files linked in issues, merge / pull requests or comments")
             return True
         links = sum(len(self._links(item.body)) for item in items)
         fg_print.info(f"Found {links} uploaded files linked in {len(items)} issues,"
-                      " merge requests and comments")
+                      " merge / pull requests and comments")
 
         # an archived repository rejects edits, so unarchive it for the duration
         was_archived = bool(forgejo_repo.archived)
@@ -129,14 +130,14 @@ class AttachmentMigrator:
     def _iter_items_with_uploads(self, owner: CanonicalRepoOwner,
                                  repo_name: str) -> Iterator[_Item]:
         issues = ApiPaginator(fg_api=self.fg_api, page_size=self.page_size,
-                              items_type="Issues and merge requests",
+                              items_type="Issues and merge / pull requests",
                               retrieval_detail=f" for {repo_name}")
         issue: Issue
         for issue in issues.iterate(fetch_page_from_api=lambda fg_api, page, limit:
                                     fg_api.issue.list_issues(owner=owner.username, repo=repo_name,
                                                              state="all", page=page, limit=limit)):
-            if issue.body and UPLOAD_LINK.search(issue.body):
-                kind = "merge request" if issue.pull_request is not None else "issue"
+            if issue.body and self.link_pattern.search(issue.body):
+                kind = "pull request" if issue.pull_request is not None else "issue"
                 yield _Item(kind="issue", label=f"{kind} #{issue.number}",
                             forgejo_id=issue.number, body=issue.body,
                             updated_at=issue.updated_at,
@@ -149,7 +150,7 @@ class AttachmentMigrator:
                                         fg_api.issue.get_repo_comments(owner=owner.username,
                                                                        repo=repo_name,
                                                                        page=page, limit=limit)):
-            if comment.body and UPLOAD_LINK.search(comment.body):
+            if comment.body and self.link_pattern.search(comment.body):
                 issue_number = (comment.issue_url or "").rstrip("/").rsplit("/", 1)[-1]
                 yield _Item(kind="comment", label=f"comment {comment.id} on #{issue_number}",
                             forgejo_id=comment.id, body=comment.body,
@@ -165,14 +166,20 @@ class AttachmentMigrator:
             original_name = unquote(filename)
             # pasted images are nearly all called image.png, so make the name unique per
             # upload, which also lets a rerun find exactly this upload
-            name = f"{secret[:12]}-{original_name}"
+            prefix = (secret[:12] if re.fullmatch(r"[0-9a-f]{32}", secret)
+                      else hashlib.sha256(secret.encode()).hexdigest()[:12])
+            name = f"{prefix}-{original_name}"
             # (a file type Forgejo refuses is uploaded zipped, see _upload)
-            url = item.existing_assets.get(name) or item.existing_assets.get(f"{name}.zip")
+            url = next((item.existing_assets[n] for n in item.existing_assets
+                        if n == name or n.startswith(f"{name}.")), None)
             if url is not None:
                 # uploaded by an interrupted earlier run
                 new_urls[(secret, filename)] = url
                 continue
             data = self.migration_source.download_upload(repo, secret, filename)
+            if data is not None and "." not in original_name:
+                # Forgejo checks the extension of attachments
+                name += next((ext for magic, ext in _EXTENSIONS if data.startswith(magic)), "")
             if data is None:
                 fg_print.error(f"{repo_name} {item.label}: unable to download {original_name} from "
                                f"{self.migration_source.get_source_system_name()} (the uploads"
@@ -190,7 +197,7 @@ class AttachmentMigrator:
             new_urls[(secret, filename)] = url
 
         if new_urls:
-            body = UPLOAD_LINK.sub(
+            body = self.link_pattern.sub(
                 lambda m: new_urls.get((m.group("secret"), m.group("filename")), m.group(0)),
                 item.body)
             if not self._save_body(owner, repo_name, item, body):
@@ -289,11 +296,10 @@ class AttachmentMigrator:
                            f" {owner.username}/{repo_name} failed")
             return False
 
-    @staticmethod
-    def _links(body: str) -> list[tuple[str, str]]:
+    def _links(self, body: str) -> list[tuple[str, str]]:
         """unique (secret, filename) of the upload links, in order"""
         return list(dict.fromkeys((m.group("secret"), m.group("filename"))
-                                  for m in UPLOAD_LINK.finditer(body)))
+                                  for m in self.link_pattern.finditer(body)))
 
     @staticmethod
     def _asset_urls(assets) -> dict[str, str]:

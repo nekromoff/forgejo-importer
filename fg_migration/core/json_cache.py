@@ -65,6 +65,11 @@ class JsonCache:
             fg_print.warning(f"Ignoring cache file {path} that cannot be decoded: {e}")
             return None
 
+    def value(self, key: str) -> Any:
+        """data of a valid entry, else None"""
+        hit = self.get(key)
+        return None if hit is None else hit[0]
+
     def put(self, key: str, data: Any) -> None:
         """write an entry immediately"""
         path = self.path(key)

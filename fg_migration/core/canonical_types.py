@@ -49,7 +49,7 @@ class CanonicalKey:
 @dataclass
 class CanonicalSystemUser:
     """A System User (i.e. that can login)"""
-    source_system:str # e.g. gitlab
+    source_system:str # e.g. GitLab, GitHub
     username: str
     full_name: str
     email: str
@@ -71,7 +71,7 @@ class CanonicalOrganizations:
     """Group of Owners of repositories and teams. Really this just allows definition
        of the source type which is typically a plural of the CanonicalOrganization
        source type (used in logging)"""
-    source_type:str # what is this type defined as at source e.g. for gitlab, Groups
+    source_type:str # what this type is called at the source, e.g. GitLab Groups
     members:list["CanonicalOrganization"] = field(default_factory=list)
 
 
@@ -96,7 +96,7 @@ class CanonicalOrganizationMembership:
 class CanonicalOrganization:
     """Owner of repositories and teams"""
     source_system:str
-    source_type:str # what is this type defined as at source e.g. for gitlab, Group
+    source_type:str # what this type is called at the source, e.g. GitLab Group
     username: str
     full_name:str
     description:str
@@ -157,9 +157,9 @@ class HierarchyNode:
 class CanonicalRepoMemberships:
     """This is essentially a wrapper around the list of CanonicalRepoMembership
        allowing the plural to be recorded"""
-    source_system:str # e.g. gitlab
+    source_system:str # e.g. GitLab, GitHub
     members:list[CanonicalRepoMembership] = field(default_factory=list)
-    source_type:str = "Users" # what is this type defined as at source e.g. for gitlab, Users
+    source_type:str = "Users" # what this type is called at the source
 
     @staticmethod
     def get_grouped_by_access_level(members:list[CanonicalRepoMembership]
@@ -187,17 +187,17 @@ class CanonicalRepo:
     auth_password:str
     auth_username:str
     auth_token:str
-    source_system:str # e.g. gitlab
-    # source_id - the UUID for this object in the source system e.g. gitlab
+    source_system:str # e.g. GitLab, GitHub
+    # source_id - the id of this object in the source system
     source_id:str
-    # source_type - what is this type defined as at source e.g. for gitlab, Project
+    # source_type - what this type is called at the source, e.g. GitLab Project
     source_type: str = "Repository"
     # archived (read only) in the source system, so it should be archived in Forgejo too
     is_archived: bool = False
 
     def get_safe_username(self) -> str:
-        """Get Forgejo safe username: the source path (e.g. GitLab project path
-           my-project), not the display name (My Project), so urls stay the same"""
+        """Get Forgejo safe username: the source path (e.g. my-project), not the display
+           name (My Project), so urls stay the same"""
         return name_clean(self.username)
 
     def get_safe_owner_name(self) -> str:

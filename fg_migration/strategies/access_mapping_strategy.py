@@ -5,7 +5,7 @@ from pyforgejo import Organization, Team
 
 from fg_migration.adapters.forgeo_types import ForgejoPermission
 from fg_migration.core.canonical_types import CanonicalOrganization, CanonicalRepo
-from fg_migration.core.caching_source import CachedGitLabSource
+from fg_migration.core.caching_source import CachedSource
 
 
 
@@ -71,7 +71,7 @@ class AccessMappingStrategy(ABC):
         defined by the concrete AccessMappingStrategy implementation.
         """
     @abstractmethod
-    def import_teams(self, migration_source:CachedGitLabSource, organization: CanonicalOrganization):
+    def import_teams(self, migration_source:CachedSource, organization: CanonicalOrganization):
         """Entry point from the migrator to import teams (no requirement to import teams)"""
 
 
@@ -91,7 +91,7 @@ class AccessMappingStrategy(ABC):
     @abstractmethod
     def import_repository_accessors(
         self,
-        migration_source: CachedGitLabSource,
+        migration_source: CachedSource,
         source_repo: CanonicalRepo,
     ):
         """Entry point from the migrator to import repository accessors"""
@@ -99,7 +99,7 @@ class AccessMappingStrategy(ABC):
     @abstractmethod
     def resolve_forgejo_permission(
         self,
-        migration_source:CachedGitLabSource,
+        migration_source:CachedSource,
         source_access_level: str,
     ) -> ForgejoPermission | None:
         """return the most appropriate Forgejo permission string

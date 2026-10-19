@@ -1,7 +1,13 @@
-"""The Forgejo roles teams and collaborators get, and the GitLab access level each one maps to"""
+"""The Forgejo roles teams and collaborators get, and the source access levels mapping to them"""
 
 # GitLab access level -> Forgejo role
 GITLAB_ACCESS_LEVEL_ROLES = {50: 'OWNER', 40: 'MAINTAINER', 30: 'DEVELOPER', 20: 'REPORTER', 10: 'GUEST'}
+
+# GitHub repository role (or organization role) -> Forgejo role.
+# Organization members get the base permission of the organization (usually read)
+GITHUB_ORG_OWNER = "org_owner"
+GITHUB_PERMISSION_ROLES = {GITHUB_ORG_OWNER: 'OWNER', 'admin': 'MAINTAINER', 'maintain': 'MAINTAINER',
+                           'write': 'DEVELOPER', 'triage': 'REPORTER', 'read': 'GUEST'}
 
 # Forgejo roles. permission (read, write, admin, owner) is used for collaborators,
 # units_map (none, read, write, admin, owner) for teams. OWNER is Forgejo's built-in Owners team

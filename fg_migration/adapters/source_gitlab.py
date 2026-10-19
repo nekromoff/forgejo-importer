@@ -1,11 +1,11 @@
 """GitLab Migration source definition"""
 from copy import copy
-import os
 import re
 from typing import Any, Callable, Iterator
 
 import gitlab  # pip install python-gitlab
 import requests
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit
 import gitlab.v4 # pylint: disable=no-name-in-module
 import gitlab.v4.objects
 
@@ -17,7 +17,7 @@ from fg_migration.core.canonical_types import (CanonicalGpgKey, CanonicalOrganiz
                                                CanonicalOrganizations, CanonicalRepo,
                                                CanonicalRepoMembership, CanonicalRepoMemberships,
                                                CanonicalSystemUser, CanonicalUser, HierarchyNode)
-from fg_migration.core.config_types import GitLabMigrationConfig, GitLabConfig
+from fg_migration.core.config_types import GitLabMigrationConfig, SourceConfig
 from fg_migration.core.roles import GITLAB_ACCESS_LEVEL_ROLES
 from fg_migration.core.json_cache import JsonCache
 
@@ -26,7 +26,7 @@ class GitLabMigrationSource:
        Note that all lists are retrieved in one operation, without paging"""
 
     gitlab_api: gitlab.Gitlab
-    gitlab_config: GitLabConfig
+    source_config: SourceConfig
     gitlab_migration_config: GitLabMigrationConfig
     source_system: str = "GitLab"
     access_level_role_map : dict[int,ForgejoRepositoryRole]
@@ -40,10 +40,10 @@ class GitLabMigrationSource:
 
     def __init__(self,
                  gitlab_api:gitlab.Gitlab,
-                 gitlab_config:GitLabConfig,
+                 source_config:SourceConfig,
                  gitlab_migration_config:GitLabMigrationConfig):
         self.gitlab_api = gitlab_api
-        self.gitlab_config = gitlab_config
+        self.source_config = source_config
         self._project_paths = {}
         self.gitlab_migration_config = gitlab_migration_config
         self.access_level_role_map = self._load_access_levels_roles_map()
@@ -63,7 +63,7 @@ class GitLabMigrationSource:
                                  user: gitlab.v4.objects.User
                                  ) -> Iterator[gitlab.v4.objects.UserEmail]:
         paginator = GitLabApiPaginator(gl_api=self.gitlab_api,
-                                       page_size=self.gitlab_config.API_MAX_PAGE_SIZE, items_type="UserEmails")
+                                       page_size=self.source_config.API_MAX_PAGE_SIZE, items_type="UserEmails")
         return paginator.iterate(fetch_page_from_api=
             lambda gl_api, page, limit: user.emails.list(
                 page=page,
@@ -78,7 +78,7 @@ class GitLabMigrationSource:
         # (on gitlab.com that is millions), so only list projects we are a member of
         membership_only = not self._is_gitlab_admin()
         paginator = GitLabApiPaginator(gl_api=self.gitlab_api,
-                                       page_size=self.gitlab_config.API_MAX_PAGE_SIZE, items_type="Projects")
+                                       page_size=self.source_config.API_MAX_PAGE_SIZE, items_type="Projects")
         return paginator.iterate(fetch_page_from_api=
             lambda gl_api, page, limit: gl_api.projects.list(
                 page=page,
@@ -93,7 +93,7 @@ class GitLabMigrationSource:
                                     project: gitlab.v4.objects.Project
                                     ) -> Iterator[gitlab.v4.objects.Group]:
         paginator = GitLabApiPaginator(gl_api=self.gitlab_api,
-                                       page_size=self.gitlab_config.API_MAX_PAGE_SIZE, items_type="Project Groups")
+                                       page_size=self.source_config.API_MAX_PAGE_SIZE, items_type="Project Groups")
         return paginator.iterate(fetch_page_from_api=
             lambda gl_api, page, limit: project.groups.list(
                 page=page,
@@ -104,7 +104,7 @@ class GitLabMigrationSource:
 
 
     def _iter_all_groups(self) -> Iterator[gitlab.v4.objects.Group]:
-        paginator = GitLabApiPaginator(gl_api=self.gitlab_api, page_size=self.gitlab_config.API_MAX_PAGE_SIZE, items_type="Groups")
+        paginator = GitLabApiPaginator(gl_api=self.gitlab_api, page_size=self.source_config.API_MAX_PAGE_SIZE, items_type="Groups")
         return paginator.iterate(fetch_page_from_api=
             lambda gl_api, page, limit: gl_api.groups.list(
                 page=page,
@@ -117,7 +117,7 @@ class GitLabMigrationSource:
     def _iter_all_sub_groups_of_group(self, group:
                                    gitlab.v4.objects.Group
                                    ) -> Iterator[gitlab.v4.objects.GroupSubgroup]:
-        paginator = GitLabApiPaginator(gl_api=self.gitlab_api, page_size=self.gitlab_config.API_MAX_PAGE_SIZE, items_type="SubGroups")
+        paginator = GitLabApiPaginator(gl_api=self.gitlab_api, page_size=self.source_config.API_MAX_PAGE_SIZE, items_type="SubGroups")
         return paginator.iterate(fetch_page_from_api=
             lambda gl_api, page, limit: group.subgroups.list(
                 page=page,
@@ -130,7 +130,7 @@ class GitLabMigrationSource:
     def _iter_all_descendant_groups_of_group(self, group:
                                    gitlab.v4.objects.Group
                                    ) -> Iterator[gitlab.v4.objects.GroupDescendantGroup]:
-        paginator = GitLabApiPaginator(gl_api=self.gitlab_api, page_size=self.gitlab_config.API_MAX_PAGE_SIZE,
+        paginator = GitLabApiPaginator(gl_api=self.gitlab_api, page_size=self.source_config.API_MAX_PAGE_SIZE,
                                        items_type="DescendantGroups")
         return paginator.iterate(fetch_page_from_api=
             lambda gl_api, page, limit: group.descendant_groups.list(
@@ -144,7 +144,7 @@ class GitLabMigrationSource:
     def _iter_all_members_of_group(self, group:
                                    gitlab.v4.objects.Group
                                    ) -> Iterator[gitlab.v4.objects.GroupMember]:
-        paginator = GitLabApiPaginator(gl_api=self.gitlab_api, page_size=self.gitlab_config.API_MAX_PAGE_SIZE, items_type="Groups")
+        paginator = GitLabApiPaginator(gl_api=self.gitlab_api, page_size=self.source_config.API_MAX_PAGE_SIZE, items_type="Groups")
         return paginator.iterate(fetch_page_from_api=
             lambda gl_api, page, limit: group.members.list(
                 page=page,
@@ -158,7 +158,7 @@ class GitLabMigrationSource:
                                      project: gitlab.v4.objects.Project
                                      ) -> Iterator[gitlab.v4.objects.ProjectMember]:
         paginator = GitLabApiPaginator(gl_api=self.gitlab_api,
-                                       page_size=self.gitlab_config.API_MAX_PAGE_SIZE, items_type="Project Members")
+                                       page_size=self.source_config.API_MAX_PAGE_SIZE, items_type="Project Members")
         return paginator.iterate(fetch_page_from_api=
             lambda gl_api, page, limit: project.members.list(
                 page=page,
@@ -177,7 +177,7 @@ class GitLabMigrationSource:
             yield from self._iter_user_refs_of_projects_and_groups()
             return
 
-        paginator = GitLabApiPaginator(gl_api=self.gitlab_api, page_size=self.gitlab_config.API_MAX_PAGE_SIZE, items_type="Users")
+        paginator = GitLabApiPaginator(gl_api=self.gitlab_api, page_size=self.source_config.API_MAX_PAGE_SIZE, items_type="Users")
         for user in paginator.iterate(fetch_page_from_api=
             lambda gl_api, page, limit: gl_api.users.list(
                 page=page,
@@ -242,7 +242,7 @@ class GitLabMigrationSource:
 
     def _iter_all_members_all_of(self, project_or_group, items_type:str) -> Iterator:
         paginator = GitLabApiPaginator(gl_api=self.gitlab_api,
-                                       page_size=self.gitlab_config.API_MAX_PAGE_SIZE, items_type=items_type)
+                                       page_size=self.source_config.API_MAX_PAGE_SIZE, items_type=items_type)
         return paginator.iterate(fetch_page_from_api=
             lambda gl_api, page, limit: project_or_group.members_all.list(
                 page=page,
@@ -255,7 +255,7 @@ class GitLabMigrationSource:
                                    user:gitlab.v4.objects.User
                                    ) -> Iterator[gitlab.v4.objects.UserGPGKey]:
         paginator = GitLabApiPaginator(gl_api=self.gitlab_api,
-                                       page_size=self.gitlab_config.API_MAX_PAGE_SIZE, items_type="UserGPGKeys")
+                                       page_size=self.source_config.API_MAX_PAGE_SIZE, items_type="UserGPGKeys")
         return paginator.iterate(fetch_page_from_api=
             lambda gl_api, page, limit: user.gpgkeys.list(
                 page=page,
@@ -268,7 +268,7 @@ class GitLabMigrationSource:
     def _iter_all_public_keys_of_user(self,
                                       user:gitlab.v4.objects.User
                                       ) -> Iterator[gitlab.v4.objects.UserKey]:
-        paginator = GitLabApiPaginator(gl_api=self.gitlab_api, page_size=self.gitlab_config.API_MAX_PAGE_SIZE, items_type="UserKeys")
+        paginator = GitLabApiPaginator(gl_api=self.gitlab_api, page_size=self.source_config.API_MAX_PAGE_SIZE, items_type="UserKeys")
         return paginator.iterate(fetch_page_from_api=
             lambda gl_api, page, limit: user.keys.list(
                 page=page,
@@ -369,10 +369,23 @@ class GitLabMigrationSource:
     def get_source_system_name(self) -> str:
         return self.source_system
 
+    def migration_service(self) -> str:
+        """the Forgejo migration service to import repositories with"""
+        return "gitlab"
+
+    def upload_link_pattern(self) -> re.Pattern:
+        """GitLab upload links, as copied unchanged by the Forgejo migration, e.g.
+             /uploads/<secret>/image.png    (relative, the usual form)
+             https://gitlab.example.com/group/project/uploads/<secret>/image.png
+             https://gitlab.example.com/-/project/123/uploads/<secret>/image.png"""
+        return re.compile(r"(?:https?://[^\s()<>\"'\[\]]*?)?/uploads/(?P<secret>[0-9a-f]{32})/"
+                          r"(?P<filename>[^\s()<>\"'\[\]?#]+)")
+
 
 
     def list_mapped_forgejo_repository_roles(self) -> set[ForgejoRepositoryRole]:
-        return set(self.access_level_role_map.values())
+        # roles from roles.py, not the custom ones created for unknown access levels
+        return {role for role in self.access_level_role_map.values() if not role.is_custom}
 
 
 
@@ -412,7 +425,7 @@ class GitLabMigrationSource:
                 # the token is enough for Forgejo to clone and read the GitLab API
                 auth_password=None
                 auth_username=None
-                auth_token=self.gitlab_config.GITLAB_TOKEN
+                auth_token=self.source_config.TOKEN
 
                 fg_print.debug(f"{self.source_system} Project name {project.path} : path {project.name}")
                 repo = CanonicalRepo(source_system=self.source_system,
@@ -456,7 +469,7 @@ class GitLabMigrationSource:
 
     def _build_gitlab_repo_url(self, owner: str, repo: str) -> str:
         # https, Forgejo authenticates with the token
-        return f"{self.gitlab_config.GITLAB_URL}/{owner}/{repo}.git"
+        return f"{self.source_config.URL}/{owner}/{repo}.git"
 
 
 
@@ -514,7 +527,7 @@ class GitLabMigrationSource:
                                                 access_level = group_member.access_level))
 
             depth = len(hierarchy)
-            if depth <= self.gitlab_config.MAX_DESCENDANT_GROUP_DEPTH:
+            if depth <= self.source_config.MAX_DESCENDANT_GROUP_DEPTH:
 
                 for descendant_group in self._iter_all_descendant_groups_of_group(group=group):
                     desc_hierarchy = copy(hierarchy)
@@ -527,7 +540,7 @@ class GitLabMigrationSource:
                                                         repository=repository,
                                                         group=descendant_group,
                                                         hierarchy=desc_hierarchy)
-            if depth <= self.gitlab_config.MAX_SUB_GROUP_DEPTH:
+            if depth <= self.source_config.MAX_SUB_GROUP_DEPTH:
                 for sub_group in self._iter_all_sub_groups_of_group(group=group):
                     sub_hierarchy = copy(hierarchy)
                     sub_hierarchy.append(HierarchyNode(
@@ -776,6 +789,45 @@ class GitLabMigrationSource:
 
 
 
+    def avatar_download_url(self, avatar_url:str) -> str:
+        """The url to download a GitLab avatar from in full quality"""
+        url = urljoin(self.source_config.URL + "/", avatar_url)
+        parts = urlsplit(url)
+        query = dict(parse_qsl(parts.query))
+        if (parts.hostname or "").endswith("gravatar.com"):
+            # GitLab asks for 80px and a generated identicon for users without a gravatar,
+            # ask for a large picture, and nothing (404) when there is none
+            query.pop("size", None)
+            query.update({"s": "512", "d": "404"})
+        else:
+            # GitLab hosted avatar, without size parameters it is the original upload
+            for size_param in ("width", "size", "s"):
+                query.pop(size_param, None)
+        return parts._replace(query=urlencode(query)).geturl()
+
+    def download_avatar(self, avatar_url:str) -> bytes | None:
+        """The avatar picture, None if the user has none (e.g. no gravatar either)"""
+        url = self.avatar_download_url(avatar_url)
+        gitlab_host = urlsplit(self.source_config.URL).hostname
+        try:
+            if urlsplit(url).hostname == gitlab_host:
+                # avatars of a private GitLab instance need the token
+                response = self.gitlab_api.session.get(
+                    url, timeout=self.source_config.REQUEST_TIMEOUT,
+                    headers={"PRIVATE-TOKEN": self.source_config.TOKEN})
+            else:
+                response = requests.get(url, timeout=self.source_config.REQUEST_TIMEOUT)
+        except requests.RequestException as e:
+            fg_print.warning(f"Failed to download avatar {url}: {e}")
+            return None
+        if response.status_code == 404:
+            return None
+        if not response.ok or not response.headers.get("Content-Type", "").startswith("image/"):
+            fg_print.warning(f"Failed to download avatar {url}: HTTP {response.status_code}"
+                             f" {response.headers.get('Content-Type', '')}")
+            return None
+        return response.content
+
     def download_upload(self, repo:CanonicalRepo, secret:str, filename:str) -> bytes | None:
         # the uploads API needs the Maintainer role in the project
         try:
@@ -794,10 +846,10 @@ class GitLabMigrationSource:
             except gitlab.GitlabError as e:
                 fg_print.debug(f"Failed to load project {repo.source_id}: {e}")
                 return None
-        url = (f"{self.gitlab_config.GITLAB_URL.rstrip('/')}/{project_path}"
+        url = (f"{self.source_config.URL.rstrip('/')}/{project_path}"
                f"/uploads/{secret}/{filename}")
         try:
-            response = self.gitlab_api.session.get(url, timeout=self.gitlab_config.REQUEST_TIMEOUT)
+            response = self.gitlab_api.session.get(url, timeout=self.source_config.REQUEST_TIMEOUT)
         except requests.RequestException as e:
             fg_print.debug(f"Failed to download {url}: {e}")
             return None

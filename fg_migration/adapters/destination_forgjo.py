@@ -1,4 +1,5 @@
 """This is a Series of classes directly involved in the updating of Forgejo as a destination"""
+import base64
 from copy import deepcopy
 import os
 import random
@@ -276,7 +277,7 @@ class ForgejoDestination:
         """Retrieve Forgejo organization with a given name"""
         try:
             #fg_print.debug(f"Trying to load forgejo organization {possible_org} "
-            #               f"for gitlab project {project.name}...")
+            #               f"for source repository {project.name}...")
             forgejo_org = self.fg_api.organization.org_get(org=org.get_safe_username())
             fg_print.debug(f"Loaded organization {forgejo_org.username} ({forgejo_org.full_name})"
                            f" matching {org.source_system}"
@@ -302,7 +303,7 @@ class ForgejoDestination:
         org_name : str = repo.get_safe_owner_name()
         try:
             #fg_print.debug(f"Trying to load forgejo organization {possible_org}"
-            #               f" for gitlab project {project.name}...")
+            #               f" for source repository {project.name}...")
             org = self.fg_api.organization.org_get(org_name)
             fg_print.debug(f"Loaded organization {org.full_name} for {repo.source_system}"
                            f" {repo.source_type} {repo.name}")
@@ -549,8 +550,7 @@ class ForgejoDestination:
 
 
 
-    def forgejo_add_user(self, user:CanonicalSystemUser, notify: bool,
-                         must_change_password:bool=True) -> bool:
+    def forgejo_add_user(self, user:CanonicalSystemUser, notify: bool) -> bool:
         """add a user to Forgejo, return True if user created or already exists"""
 
         # need this because status 422 returned for conflict, not 409
@@ -565,7 +565,7 @@ class ForgejoDestination:
                     login_name=user.get_safe_username(),
                     password=tmp_password,
                     send_notify=notify,
-                    must_change_password=must_change_password,
+                    must_change_password=True,
                     source_id=0,  # local user
                     username=user.get_safe_username(),
                 )
@@ -585,17 +585,29 @@ class ForgejoDestination:
         return True
 
 
-    def forgejo_force_password_change(self, user:CanonicalSystemUser, new_value:bool=True):
-        """Force user to change password on next login"""
+    def forgejo_delete_user_avatar(self, username: str) -> bool:
+        """Back to Forgejo's default avatar, as that user"""
         try:
-            self.fg_api.admin.edit_user(username=user.username, must_change_password=new_value)
+            self.fg_api.user.delete_avatar(request_options={"additional_headers":
+                                                            {"Sudo": username}})
+            return True
         except (ApiError, RequestException) as e:
             detail = self._get_exception_detail(e)
-            fg_print.error(f"Failed to force password change for {user.source_system} "
-                           f"user {user.username} as {user.get_safe_username()}: {detail}",
-                           f"Failed to force password change for {user.source_system} "
-                           f"user {user.username} as {user.get_safe_username()}",
-            )
+            fg_print.error(f"Failed to reset the avatar of user {username}: {detail}",
+                           f"Failed to reset the avatar of user {username}")
+            return False
+
+    def forgejo_set_user_avatar(self, username: str, image: bytes) -> bool:
+        """Upload the avatar of a user, as that user (the admin token can act for any user)"""
+        try:
+            self.fg_api.user.update_avatar(image=base64.b64encode(image).decode("ascii"),
+                                           request_options={"additional_headers":
+                                                            {"Sudo": username}})
+            return True
+        except (ApiError, RequestException) as e:
+            detail = self._get_exception_detail(e)
+            fg_print.error(f"Failed to upload the avatar of user {username}: {detail}",
+                           f"Failed to upload the avatar of user {username}")
             return False
 
 
@@ -810,7 +822,7 @@ class ForgejoDestination:
 
     def forgejo_add_organization(self, organization: CanonicalOrganization,
                                  existing_forgejo_org:Organization|None) -> bool:
-        """add a group as organization in Forgejo"""
+        """add an organization (GitLab group, GitHub organization) to Forgejo"""
         if existing_forgejo_org is None:
             try:
                 self.fg_api.organization.org_create(
@@ -834,8 +846,8 @@ class ForgejoDestination:
                 )
                 return False
         # return true even if the organization already exists, because the existence of
-        # the organization is not a failure for the import of the group, we just skip it
-        # and continue with the import of the group members and projects
+        # the organization is not a failure for the import, we just skip it
+        # and continue with the import of the members and repositories
         return True
 
 
@@ -878,7 +890,7 @@ class ForgejoDestination:
 
     def forgejo_add_user_to_organization_team(self, username: str,
                                               organization_name: str, team: Team) -> bool:
-        """add a user to a team for a group"""
+        """add a user to a team of an organization"""
 
         try:
             self.fg_api.organization.org_add_team_member(team.id, username)
@@ -899,7 +911,7 @@ class ForgejoDestination:
 
     def forgejo_remove_user_from_organization_team(self, username: str,
                                                    organization_name: str, team: Team) -> bool:
-        """remove a user from a team for a group"""
+        """remove a user from a team of an organization"""
 
         try:
             self.fg_api.organization.org_remove_team_member(team.id, username)

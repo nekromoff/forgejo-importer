@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 #
-# imports projects, users, groups, issues, labels, milestones, keys
-# and collaborators from GitLab to Forgejo
+# imports users, organizations, repositories (with issues, merge / pull requests, wiki...),
+# keys and collaborators from GitLab or GitHub to Forgejo
 #
 """
 Usage: migrate.py [--debug] [--users] [--groups] [--projects] [--membership] [--attachments] [--all] [--notify] [--refresh-cache] [--from-start]
        migrate.py --help
 
-Migrates users, groups, projects, their members and attachments from GitLab to Forgejo.
+Migrates users, organizations, repositories, their members and attachments from GitLab or GitHub
+(set in [source] of .migrate.ini) to Forgejo.
 
 Options
   -h, --help    Show this screen
   --debug       show extra debug output
   --users       migrate users
-  --groups      migrate groups
-  --projects    migrate projects
-  --membership  migrate project membership
-  --attachments    copy files linked in issues, merge requests and comments (e.g.
+  --groups      migrate organizations (GitLab groups, GitHub organizations)
+  --projects    migrate repositories (GitLab projects, GitHub repositories)
+  --membership  migrate repository members
+  --attachments    copy files linked in issues, merge / pull requests and comments (e.g.
                    pasted images) into Forgejo and fix the links (migrated projects)
   --all         migrate all
   --notify      send notification to users
-  --refresh-cache  ignore cached source system data (users, groups, projects,
+  --refresh-cache  ignore cached source data (users, organizations, repositories,
                    members) and fetch it again
   --from-start     go over all items of each step, instead of continuing at the
                    item where the last (interrupted) run of that step stopped
@@ -37,7 +38,7 @@ from fg_migration.core.config_types import ForgejoConfig
 from fg_migration.adapters.destination_forgjo import ForgejoDestination
 from fg_migration.services.migrator import Migrator
 from fg_migration.services.attachment_migrator import AttachmentMigrator
-from fg_migration.core.caching_source import build_gitlab_source
+from fg_migration.core.caching_source import build_source
 from fg_migration.core.json_cache import JsonCache
 
 from fg_migration.utils import fg_print
@@ -76,8 +77,11 @@ def main() -> int:
 
 
     try:
-        migration_source = build_gitlab_source(config=config,
-                                               refresh_cache=bool(args["--refresh-cache"]))
+        migration_source = build_source(config=config,
+                                        refresh_cache=bool(args["--refresh-cache"]))
+    except ValueError as e:
+        fg_print.error(str(e))
+        return 1
     except ConnectionError:
         return 2
 
@@ -121,10 +125,8 @@ def main() -> int:
         if run_users:
             notify=bool(args["--notify"])
             migrator.import_users(notify=notify)
-        # IMPORT Organizations and Teams (Groups and their member Users)
+        # IMPORT Organizations and Teams (with their member Users)
         if run_groups:
-            # Note, import_groups uses the gitlab projects object
-            # because they're intrinsically linked really.
             migrator.import_organizations()
         # IMPORT Repositories (Projects) AND OR Collaborators (Memberships of Projects)
         if run_projects or run_membership:
